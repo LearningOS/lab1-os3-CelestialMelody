@@ -23,17 +23,8 @@ pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
 
-use crate::timer::get_time;
+use crate::timer::get_time_us;
 
-/// The task manager, where all the tasks are managed.
-///
-/// Functions implemented on `TaskManager` deals with all task state transitions
-/// and task context switching. For convenience, you can find wrappers around it
-/// in the module level.
-///
-/// Most of `TaskManager` are hidden behind the field `inner`, to defer
-/// borrowing checks to runtime. You can see examples on how to use `inner` in
-/// existing functions on `TaskManager`.
 pub struct TaskManager {
     /// total number of tasks
     num_app: usize,
@@ -57,8 +48,9 @@ lazy_static! {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
             syscall_times: [0; MAX_SYSCALL_NUM],
-            time_begin: get_time(),
-            time_after: get_time()
+            time_begin: 0,
+            time_end: 0,
+            first_run: true,
         }; MAX_APP_NUM];
         for (i, t) in tasks.iter_mut().enumerate().take(num_app) {
             t.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -86,8 +78,7 @@ impl TaskManager {
         let task0 = &mut inner.tasks[0];
         task0.task_status = TaskStatus::Running;
         
-        task0.time_begin = get_time();
-        // task0.syscall_times[SYSCALL_GET_TIME] += 1;
+        task0.time_begin = get_time_us();
 
         let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
         drop(inner);
@@ -111,6 +102,8 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         inner.tasks[current].task_status = TaskStatus::Exited;
+
+        inner.tasks[current].time_end = get_time_us();
     }
 
     /// Find next task to run and return task id.
@@ -130,6 +123,12 @@ impl TaskManager {
         if let Some(next) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
+
+            if inner.tasks[next].first_run {
+                inner.tasks[next].time_begin = get_time_us();
+                inner.tasks[next].first_run = false;
+            }
+
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
@@ -146,6 +145,32 @@ impl TaskManager {
     }
 
     // LAB1: Try to implement your function to update or get task info!
+    fn get_task_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_status
+    }
+
+    fn get_task_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM] {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times
+    }
+
+    fn update_syscall_record(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+    }
+
+    fn get_task_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        match inner.tasks[current].task_status {
+            TaskStatus::Exited => (inner.tasks[current].time_end - inner.tasks[current].time_begin) / 1000,
+            _ => (get_time_us() - inner.tasks[current].time_begin) /1000
+        }
+    }
 }
 
 /// Run the first task in task list.
@@ -155,7 +180,7 @@ pub fn run_first_task() {
 
 /// Switch current `Running` task to the task we have found,
 /// or there is no `Ready` task and we can exit with all applications completed
-fn run_next_task() {
+fn run_next_task() { 
     TASK_MANAGER.run_next_task();
 }
 
@@ -183,3 +208,19 @@ pub fn exit_current_and_run_next() {
 
 // LAB1: Public functions implemented here provide interfaces.
 // You may use TASK_MANAGER member functions to handle requests.
+
+pub fn get_task_status() -> TaskStatus {
+    TASK_MANAGER.get_task_status()
+}
+
+pub fn get_task_syscall_times() -> [u32; MAX_SYSCALL_NUM]{
+    TASK_MANAGER.get_task_syscall_times()
+}
+
+pub fn get_task_time() -> usize {
+    TASK_MANAGER.get_task_time()
+}
+
+pub fn update_syscall_record(syscall_id: usize) {
+    TASK_MANAGER.update_syscall_record(syscall_id);
+}
